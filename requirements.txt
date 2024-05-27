@@ -1,0 +1,6 @@
+librosa
+moderngl
+moderngl-window
+numpy
+soundcard
+watchdog

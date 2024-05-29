@@ -22,19 +22,26 @@ class LayerManager:
         self.layers = []
         self.update_layers = False
 
-        self.texture_a = self.ctx.texture((self.ctx.screen.width, self.ctx.screen.height), 4)
-        self.texture_b = self.ctx.texture((self.ctx.screen.width, self.ctx.screen.height), 4)
-
-        self.framebuffer_a = self.ctx.framebuffer(color_attachments=[self.texture_a])
-        self.framebuffer_b = self.ctx.framebuffer(color_attachments=[self.texture_b])
-
-        self.texture_out = self.ctx.texture((self.ctx.screen.width, self.ctx.screen.height), 4)
-        self.framebuffer_out = self.ctx.framebuffer(color_attachments=[self.texture_out])
+        self.textures = []
+        self.framebuffers = []
 
         self.premade_shader_map = {
             'solid': layers.SolidColor,
             'osc': layers.Osc,
             'triangle': layers.Triangle,
+            'pixelate': layers.Pixelate,
+            'scale': layers.Scale,
+            'rotate': layers.Rotate,
+            'repeat': layers.Repeat,
+            'kaleid': layers.Kaleid,
+            'shift': layers.Shift,
+            'invert': layers.Invert,
+            'luma': layers.Luma,
+            'gradient': layers.Gradient,
+            'noise': layers.Noise,
+            'add': layers.Add,
+            'multiply': layers.Multiply,
+            'modulate': layers.Modulate,
         }
         self.python_obj_map = {
 
@@ -79,10 +86,14 @@ class LayerManager:
     def update(self):
         try:
             if self.update_layers:
-                for layer in self.layers:
+                for layer, texture, framebuffer in zip(self.layers, self.textures, self.framebuffers):
                     layer.exit()
+                    texture.release()
+                    framebuffer.release()
 
                 self.layers = []
+                self.textures = []
+                self.framebuffers = []
                 for layer_info in self.layers_info:
                     layer_name = layer_info['name']
                     layer_kwargs = {k: v for k, v in layer_info.items() if k != 'name'}
@@ -100,6 +111,10 @@ class LayerManager:
                             assert new_layer.source_layer, f"First layer {new_layer} must be a source layer"
 
                         self.layers.append(new_layer)
+                        texture = self.ctx.texture((self.ctx.screen.width, self.ctx.screen.height), 4)
+                        self.textures.append(texture)
+                        framebuffer = self.ctx.framebuffer(color_attachments=[texture])
+                        self.framebuffers.append(framebuffer)
                     except Exception as e:
                         print(f"Error creating layer {layer_name}: {e}")
                 self.update_layers = False
@@ -117,50 +132,40 @@ class LayerManager:
         for layer in self.layers:
             layer.exit()
 
-        self.texture_a.release()
-        self.texture_b.release()
-        self.texture_out.release()
-        self.framebuffer_a.release()
-        self.framebuffer_b.release()
-        self.framebuffer_out.release()
+        for texture in self.textures:
+            texture.release()
+
+        for framebuffer in self.framebuffers:
+            framebuffer.release()
 
     def render(self, resolution, time, fft):
-        for i, layer in enumerate(self.layers[:-1]):
+        for i, layer, framebuffer in zip(range(len(self.layers)), self.layers, self.framebuffers):
             # First shader renders to the first framebuffer
-            if i % 2 == 0:
-                self.framebuffer_a.use()
-            else:
-                self.framebuffer_b.use()
+            framebuffer.use()
             self.ctx.clear(0.0, 0.0, 0.0, 1.0)
             kwargs = {}
-            if i != 0:
-                # Subsequent shaders use the previous texture as input
-                if (i-1) % 2 == 0:
-                    self.texture_b.use(location=0)
-                else:
-                    self.texture_a.use(location=0)
-                kwargs['input_texture'] = 0 # Texture unit 0
+            if 'input_texture' in layer.get_uniforms() and len(self.layers) > 1:
+                self.textures[i-1].use(location=0)
+                kwargs['input_texture'] = 0
+
+            if 'other_texture' in layer.get_uniforms():
+                self.textures[-1].use(location=1)
+                kwargs['other_texture'] = 1
 
             kwargs['fft'] = fft
             kwargs['resolution'] = resolution
             kwargs['time'] = time
             layer.render(**kwargs)
-        
-        if len(self.layers) > 0:
-            # Final output to the screen
-            self.ctx.screen.use()
-            kwargs = {}
-            if len(self.layers) > 1:
-                if len(self.layers) % 2 == 0:
-                    self.texture_a.use(location=0)
-                else:
-                    self.texture_b.use(location=0)
-                kwargs['input_texture'] = 0
 
-            kwargs['fft'] = fft
-            kwargs['resolution'] = resolution
-            kwargs['time'] = time
-            self.layers[-1].render(**kwargs)
+        # render final framebuffer to screen
+        self.ctx.screen.use()
+        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.textures[-1].use(location=0)
+        final_layer = layers.Identity(self.ctx)
+        kwargs = {}
+        kwargs['input_texture'] = 0
+        kwargs['resolution'] = resolution
+        final_layer.render(**kwargs)
 
 
 class RealTimeShaderApp(mglw.WindowConfig):
@@ -185,14 +190,14 @@ class RealTimeShaderApp(mglw.WindowConfig):
         self.mic = microphone.recorder(samplerate=samplerate, channels=1, blocksize=self.fft_size).__enter__()
 
     def render(self, time, frame_time):
-        self.ctx.clear(1.0, 1.0, 1.0)
         resolution = (self.window_size[0], self.window_size[1])
         audio_data = self.mic.record()
         # Convert to mono by averaging channels if needed
         audio_data = np.mean(audio_data, axis=1)
         # Perform FFT using librosa
-        fft_data = librosa.stft(audio_data, n_fft=self.fft_size)[:,-1]
-        fft = np.abs(fft_data).flatten() / np.max(np.abs(fft_data))
+        fft_data = librosa.stft(audio_data, n_fft=self.fft_size)[:,0]
+        # TODO apply smoothign to fft_data
+        fft = np.abs(fft_data)
         self.layer_manager.update()
         self.layer_manager.render(resolution, time, fft)
 

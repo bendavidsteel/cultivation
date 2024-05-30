@@ -117,6 +117,7 @@ class CustomShader(BaseShader):
     def __init__(self, ctx, shader_name, **kwargs):
         self.shader_name = shader_name
         self.reload_shaders = False
+        self.source_layer = True
         self.ctx = ctx
         self.kwargs = kwargs
         self.read_shader_files()
@@ -181,6 +182,8 @@ class CustomShader(BaseShader):
                 self.program = old_program
                 self.load_vao()
                 print(f"Error reloading shader: {e}")
+            else:
+                print(f"Succesfully reloaded shader {self.shader_name}")
             self.reload_shaders = False
 
     def exit(self):
@@ -617,12 +620,22 @@ class Triangle(BaseShader):
         )
 
 class Noise(BaseShader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if 'scale' not in self.kwargs:
+            self.kwargs['scale'] = 1.
+        if 'speed' not in self.kwargs:
+            self.kwargs['speed'] = 1.
+
     def get_fragment_shader(self):
         return """
             #version 330
 
             uniform float time;
             uniform vec2 resolution;
+
+            uniform float scale;
+            uniform float speed;
 
             out vec4 out_color;
 
@@ -707,18 +720,14 @@ class Noise(BaseShader):
                 ivec2 coord = ivec2(gl_FragCoord.xy);
 
                 vec2 p = vec2(1.0) * coord.xy/resolution.xy;
-                vec3 p3_x = vec3(p, (time + 10000)*0.025);
-                vec3 p3_y = vec3(p, time*0.025);
+                vec3 p3 = vec3(p * scale, time*0.025 * speed);
                 
-                float flow_x = simplex3d_fractal(p3_x*8.0+8.0);
-                float flow_y = simplex3d_fractal(p3_y*8.0+8.0);
-
-                vec2 flow_force = vec2(flow_x, flow_y);
+                float noise = simplex3d_fractal(p3*8.0+8.0);
 
                 // scale to 0-1 for image storage
-                flow_force = 0.5 + (0.5 * flow_force);
+                noise = 0.5 + (0.5 * noise);
 
-                out_color = vec4(flow_force, 1., 1.);
+                out_color = vec4(vec3(noise), 1.);
             }
         """
 
@@ -827,3 +836,4 @@ class Identity(BaseShader):
                 fragColor = vec4(color, 1.0);
             }
             """
+    

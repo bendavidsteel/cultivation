@@ -158,14 +158,15 @@ class LayerManager:
             layer.render(**kwargs)
 
         # render final framebuffer to screen
-        self.ctx.screen.use()
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
-        self.textures[-1].use(location=0)
-        final_layer = layers.Identity(self.ctx)
-        kwargs = {}
-        kwargs['input_texture'] = 0
-        kwargs['resolution'] = resolution
-        final_layer.render(**kwargs)
+        if len(self.layers) > 0:
+            self.ctx.screen.use()
+            self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+            self.textures[-1].use(location=0)
+            final_layer = layers.Identity(self.ctx)
+            kwargs = {}
+            kwargs['input_texture'] = 0
+            kwargs['resolution'] = resolution
+            final_layer.render(**kwargs)
 
 
 class RealTimeShaderApp(mglw.WindowConfig):
@@ -182,12 +183,14 @@ class RealTimeShaderApp(mglw.WindowConfig):
         self.layer_manager = LayerManager(self.ctx, config_path)
 
         samplerate = 44100  # Sample rate in Hz
-        self.duration = 1  # Duration of each recording in seconds
+        self.duration = 5  # Duration of each recording in seconds
         self.fft_size = 4  # Number of FFT points
+        self.fft_memory = 8192  # Number of FFT points to average over
 
         # Get the default microphone
         microphone = sc.default_microphone()
         self.mic = microphone.recorder(samplerate=samplerate, channels=1, blocksize=self.fft_size).__enter__()
+        self.fft = np.zeros((self.fft_size-1, self.fft_memory))
 
     def render(self, time, frame_time):
         resolution = (self.window_size[0], self.window_size[1])
@@ -195,9 +198,15 @@ class RealTimeShaderApp(mglw.WindowConfig):
         # Convert to mono by averaging channels if needed
         audio_data = np.mean(audio_data, axis=1)
         # Perform FFT using librosa
-        fft_data = librosa.stft(audio_data, n_fft=self.fft_size)[:,0]
-        # TODO apply smoothign to fft_data
+        fft_data = librosa.stft(audio_data, n_fft=self.fft_size)
+        # smooth the fft data
+        smoothing_factor = 0.0001
         fft = np.abs(fft_data)
+        fft /= np.sum(fft)
+        self.fft[:, fft.shape[1]:] = self.fft[:, :-fft.shape[1]]
+        self.fft[:, :fft.shape[1]] = fft
+        moving_avg_weights = (np.ones(self.fft_memory) - smoothing_factor) ** np.arange(self.fft_memory)
+        fft = np.sum(self.fft * moving_avg_weights, axis=1)
         self.layer_manager.update()
         self.layer_manager.render(resolution, time, fft)
 

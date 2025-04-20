@@ -1,43 +1,79 @@
-import numpy as np
-import moderngl
-import glm
 import json
+import logging
 import math
 
-from layers import BaseShader
+import glm
+import numpy as np
+import moderngl
+import trimesh
+
+from layers import BaseShader, BaseLayer
+import utils
+
+
+class Primitives(BaseLayer):
+    """Layer for rendering multiple primitive shapes"""
+    def __init__(self, ctx, logger: logging.Logger, **kwargs):
+        self.primitives = []
+        self.logger = logger
+        self.ctx = ctx
+        
+
+        for primitive in kwargs.get('shapes', []):
+            shape = Shape3D(ctx, logger, **primitive)
+            self.primitives.append(shape)
+        self.source_layer = True
+
+    def render(self, **kwargs):
+        for primitive in self.primitives:
+            try:
+                primitive.render(**kwargs)
+            except Exception as e:
+                self.logger.error(f"Error rendering primitive {primitive}: {e}")
+                # render black if error occurs
+                self.ctx.clear(0.0, 0.0, 0.0, 1.0)
 
 class Shape3D(BaseShader):
     """Layer for rendering 3D primitive shapes"""
     
-    def __init__(self, ctx, **kwargs):
+    def __init__(self, ctx, logger: logging.Logger, **kwargs):
         self.shape_type = kwargs.get('shape_type', 'cube')
         self.size = kwargs.get('size', 1.0)
         self.position = kwargs.get('position', [0.0, 0.0, 0.0])
         self.rotation = kwargs.get('rotation', [0.0, 0.0, 0.0])
         self.color = kwargs.get('color', [1.0, 1.0, 1.0])
         self.use_lighting = kwargs.get('lighting', True)
+        self.ambient_strength = kwargs.get('ambient_strength', 0.2)
+        
         self.shape_detail = kwargs.get('detail', 16)  # For spheres, cylinders
         self.source_layer = True
         
         # Process parameters
+        if not ((isinstance(self.size, list) and len(self.size) == 3) or isinstance(self.size, (int, float, str))):
+            logger.warning(f"Invalid size format: {self.size}. Defaulting to 1.0")
+            self.size = 1.0
+
         # Ensure position is a list of 3 elements
         if not isinstance(self.position, list) or len(self.position) != 3:
+            logger.warning(f"Invalid position format: {self.position}. Defaulting to [0.0, 0.0, 0.0]")
             self.position = [0.0, 0.0, 0.0]
         
         # Ensure rotation is a list of 3 elements
         if not isinstance(self.rotation, list) or len(self.rotation) != 3:
+            logger.warning(f"Invalid rotation format: {self.rotation}. Defaulting to [0.0, 0.0, 0.0]")
             self.rotation = [0.0, 0.0, 0.0]
         
         # Ensure color is a list of 3 elements
         if not isinstance(self.color, list) or len(self.color) != 3:
+            logger.warning(f"Invalid color format: {self.color}. Defaulting to [1.0, 1.0, 1.0]")
             self.color = [1.0, 1.0, 1.0]
             
         # Remove our custom params from kwargs before passing to parent
         for key in ['shape_type', 'size', 'position', 'rotation', 'color', 'lighting', 'detail']:
             if key in kwargs:
                 kwargs.pop(key)
-            
-        super().__init__(ctx, **kwargs)
+
+        super().__init__(ctx, logger, **kwargs)
         
     def load_vao(self):
         # Generate shape vertices based on type
@@ -89,64 +125,57 @@ class Shape3D(BaseShader):
         model = glm.mat4(1.0)
         
         # Apply rotation (convert degrees to radians)
-        rot_x, rot_y, rot_z = [math.radians(float(r)) if not isinstance(r, str) else r for r in self.rotation]
+        real_rot = []
+        for r in self.rotation:
+            if isinstance(r, str):
+                # Handle rotation expressions
+                r = utils.eval_statement(r, kwargs, 0.0, 'rotation', self.logger)
+            else:
+                r = math.radians(float(r))
+            real_rot.append(float(r))
         
-        # Handle rotation expressions
-        if isinstance(rot_x, str):
-            try:
-                rot_x = eval(rot_x, {}, {'time': time, 'np': np, 'math': math, 'sin': math.sin, 'cos': math.cos})
-            except Exception as e:
-                print(f"Error evaluating rotation expression: {e}")
-                rot_x = 0.0
-                
-        if isinstance(rot_y, str):
-            try:
-                rot_y = eval(rot_y, {}, {'time': time, 'np': np, 'math': math, 'sin': math.sin, 'cos': math.cos})
-            except Exception as e:
-                print(f"Error evaluating rotation expression: {e}")
-                rot_y = 0.0
-                
-        if isinstance(rot_z, str):
-            try:
-                rot_z = eval(rot_z, {}, {'time': time, 'np': np, 'math': math, 'sin': math.sin, 'cos': math.cos})
-            except Exception as e:
-                print(f"Error evaluating rotation expression: {e}")
-                rot_z = 0.0
-        
-        model = model * glm.rotate(glm.mat4(1.0), rot_x, glm.vec3(1.0, 0.0, 0.0))
-        model = model * glm.rotate(glm.mat4(1.0), rot_y, glm.vec3(0.0, 1.0, 0.0))
-        model = model * glm.rotate(glm.mat4(1.0), rot_z, glm.vec3(0.0, 0.0, 1.0))
+        model = model * glm.rotate(glm.mat4(1.0), real_rot[0], glm.vec3(1.0, 0.0, 0.0))
+        model = model * glm.rotate(glm.mat4(1.0), real_rot[1], glm.vec3(0.0, 1.0, 0.0))
+        model = model * glm.rotate(glm.mat4(1.0), real_rot[2], glm.vec3(0.0, 0.0, 1.0))
         
         # Apply scale
-        size = self.size if isinstance(self.size, (int, float)) else 1.0
-        model = model * glm.scale(glm.mat4(1.0), glm.vec3(size, size, size))
+        real_size = []
+        if isinstance(self.size, int):
+            real_size = map(float, [self.size, self.size, self.size])
+        elif isinstance(self.size, str):
+            # Handle size expressions
+            real_size = utils.eval_statement(self.size, kwargs, 1.0, 'size', self.logger)
+            real_size = [real_size, real_size, real_size]
+        elif isinstance(self.size, list) and len(self.size) == 3:
+            for s in self.size:
+                if isinstance(s, str):
+                    s = utils.eval_statement(s, kwargs, 1.0, 'size', self.logger)
+                elif isinstance(s, int):
+                    s = float(s)
+                real_size.append(float(s))
+        model = model * glm.scale(glm.mat4(1.0), glm.vec3(*real_size))
         
         # Apply position
-        x, y, z = self.position
+        real_pos = []
+        for p in self.position:
+            if isinstance(p, str):
+                # Handle position expressions
+                p = utils.eval_statement(p, kwargs, 0.0, 'position', self.logger)
+            elif isinstance(p, int):
+                p = float(p)
+            real_pos.append(float(p))
         
-        # Handle position expressions
-        if isinstance(x, str):
-            try:
-                x = eval(x, {}, {'time': time, 'np': np, 'math': math, 'sin': math.sin, 'cos': math.cos})
-            except Exception as e:
-                print(f"Error evaluating position expression: {e}")
-                x = 0.0
-                
-        if isinstance(y, str):
-            try:
-                y = eval(y, {}, {'time': time, 'np': np, 'math': math, 'sin': math.sin, 'cos': math.cos})
-            except Exception as e:
-                print(f"Error evaluating position expression: {e}")
-                y = 0.0
-                
-        if isinstance(z, str):
-            try:
-                z = eval(z, {}, {'time': time, 'np': np, 'math': math, 'sin': math.sin, 'cos': math.cos})
-            except Exception as e:
-                print(f"Error evaluating position expression: {e}")
-                z = 0.0
-        
-        model = model * glm.translate(glm.mat4(1.0), glm.vec3(x, y, z))
+        model = model * glm.translate(glm.mat4(1.0), glm.vec3(*real_pos))
+
+        # evaluate colour
+        real_color = []
+        for c in self.color:
+            if isinstance(c, str):
+                # Handle color expressions
+                c = utils.eval_statement(c, kwargs, 1.0, 'color', self.logger)
+            elif isinstance(c, int):
+                c = float(c)
+            real_color.append(float(c))
         
         # Set uniforms
         if 'model_matrix' in self.program:
@@ -156,7 +185,7 @@ class Shape3D(BaseShader):
         if 'proj_matrix' in self.program:
             self.program['proj_matrix'].write(proj)
         if 'color' in self.program:
-            self.program['color'] = tuple(self.color)
+            self.program['color'] = tuple(real_color)
         if 'time' in self.program:
             self.program['time'] = time
         if 'use_lighting' in self.program:
@@ -171,10 +200,7 @@ class Shape3D(BaseShader):
         for k, val in self.kwargs.items():
             if k in self.program:
                 if isinstance(val, str):
-                    try:
-                        self.program[k] = eval(val, {}, {'fft': kwargs.get('fft', None), 'np': np, 'time': kwargs.get('time', 0.0)})
-                    except Exception as e:
-                        print(f"Error setting uniform {k}: {e}")
+                    self.program[k] = utils.eval_statement(val, kwargs, 1.0, k, self.logger)
                 else:
                     self.program[k] = val
         

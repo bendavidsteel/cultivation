@@ -1,5 +1,6 @@
 import datetime
 import json
+import logging
 import os
 import traceback
 import math
@@ -16,14 +17,17 @@ import shape3d
 import utils
 
 class LayerManager:
-    def __init__(self, ctx, config_path):
+    logger: logging.Logger
+
+    def __init__(self, ctx, config_path, logger):
         self.config_path = config_path
+        self.logger = logger
 
         # Initial shader load
         self.event_handler, self.observer = utils.setup_observer(config_path, self, "load_config")
 
         self.ctx = ctx
-        self.layers = []
+        self.outputs = {}
         self.update_layers = False
 
         self.textures = []
@@ -62,39 +66,35 @@ class LayerManager:
     def load_config(self):
         try:
             with open(self.config_path, "r") as f:
-                layer_info = json.load(f)
+                config = json.load(f)
 
-            if "layers" not in layer_info:
-                raise ValueError("No 'layers' key in layer_info")
-            
-            self.layers_config = layer_info['layers']
-
-            # ensure layers are correctly formatted
-            self.layers_info = []
-            for layer_config in self.layers_config:
-                if isinstance(layer_config, str):
-                    layer_info = {
-                        'name': layer_config
-                    }
-                elif isinstance(layer_config, dict):
-                    assert 'name' in layer_config, f"{layer_config} must have 'name' attribute"
-                    layer_kwargs = {k: v for k, v in layer_config.items() if k != 'name'}
+            for output_name, layers in config.items():
+                # ensure layers are correctly formatted
+                self.outputs[output_name] = []
+                for layer_config in layers:
+                    if isinstance(layer_config, str):
+                        layer_info = {
+                            'name': layer_config
+                        }
+                    elif isinstance(layer_config, dict):
+                        assert 'name' in layer_config, f"{layer_config} must have 'name' attribute"
+                        layer_kwargs = {k: v for k, v in layer_config.items() if k != 'name'}
+                        
+                        # Allow nested objects for 3D shapes
+                        for k, val in layer_kwargs.items():
+                            val_type = type(val)
+                            if val_type not in [int, float, str, list, dict, bool]:
+                                raise ValueError(f"Layer kwarg values must be int, float, str, list, bool, or dict, found {val_type}")
+                        
+                        layer_info = layer_config.copy()
+                    else:
+                        raise ValueError(f"Layer must be either a str or a dict, got {layer_config}")
                     
-                    # Allow nested objects for 3D shapes
-                    for k, val in layer_kwargs.items():
-                        val_type = type(val)
-                        if val_type not in [int, float, str, list, dict, bool]:
-                            raise ValueError(f"Layer kwarg values must be int, float, str, list, bool, or dict, found {val_type}")
-                    
-                    layer_info = layer_config.copy()
-                else:
-                    raise ValueError(f"Layer must be either a str or a dict, got {layer_config}")
-                
-                self.layers_info.append(layer_info)
+                    self.outputs[output_name].append(layer_info)
 
             self.update_layers = True
         except Exception as e:
-            print(f"Error loading config file: {e}, {traceback.format_exc()}")
+            self.logger.error(f"Error loading config file: {e}, {traceback.format_exc()}")
 
     def update(self):
         try:
@@ -113,12 +113,14 @@ class LayerManager:
 
                     try:
                         # check to see what kind of layer this is
-                        if layer_name in self.premade_shader_map:
-                            new_layer = self.premade_shader_map[layer_name](self.ctx, **layer_kwargs)
+                        if layer_name == 'primitives':
+                            new_layer = shape3d.Primitives(self.ctx, self.logger, **layer_kwargs)
+                        elif layer_name in self.premade_shader_map:
+                            new_layer = self.premade_shader_map[layer_name](self.ctx, self.logger, **layer_kwargs)
                         elif layer_name in self.python_obj_map:
-                            new_layer = layers.PythonLayer(self.ctx, self.python_obj_map[layer_name], **layer_kwargs)
+                            new_layer = layers.PythonLayer(self.ctx, self.logger, self.python_obj_map[layer_name], **layer_kwargs)
                         else:
-                            new_layer = layers.CustomShader(self.ctx, layer_name, **layer_kwargs)
+                            new_layer = layers.CustomShader(self.ctx, self.logger, layer_name, **layer_kwargs)
 
                         if len(self.layers) == 0:
                             assert new_layer.source_layer, f"First layer {new_layer} must be a source layer"
@@ -129,14 +131,14 @@ class LayerManager:
                         framebuffer = self.ctx.framebuffer(color_attachments=[texture])
                         self.framebuffers.append(framebuffer)
                     except Exception as e:
-                        print(f"Error creating layer {layer_name}: {e}")
+                        self.logger.error(f"Error creating layer {layer_name}: {e}")
                 self.update_layers = False
 
             for layer in self.layers:
                 layer.update()
                     
         except Exception as e:
-            print(f"Error loading layers at {datetime.datetime.now()}: {e}, {traceback.format_exc()}")
+            self.logger.error(f"Error loading layers at {datetime.datetime.now()}: {e}, {traceback.format_exc()}")
             self.successful_load = False
         else:
             self.successful_load = True
@@ -161,25 +163,31 @@ class LayerManager:
             framebuffer.use()
             self.ctx.clear(0.0, 0.0, 0.0, 1.0)
             kwargs = {}
-            if 'input_texture' in layer.get_uniforms() and len(self.layers) > 1:
+            if hasattr(layer, 'get_uniforms') and 'input_texture' in layer.get_uniforms() and len(self.layers) > 1:
                 self.textures[i-1].use(location=0)
                 kwargs['input_texture'] = 0
 
-            if 'other_texture' in layer.get_uniforms():
+            if hasattr(layer, 'get_uniforms') and 'other_texture' in layer.get_uniforms():
                 self.textures[-1].use(location=1)
                 kwargs['other_texture'] = 1
 
             kwargs['fft'] = fft
             kwargs['resolution'] = resolution
             kwargs['time'] = time
-            layer.render(**kwargs)
+            try:
+                layer.render(**kwargs)
+            except Exception as e:
+                self.logger.error(f"Error rendering layer {layer}: {e}")
+                # render black if error occurs
+                self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+
 
         # render final framebuffer to screen
         if len(self.layers) > 0:
             self.ctx.screen.use()
             self.ctx.clear(0.0, 0.0, 0.0, 1.0)
             self.textures[-1].use(location=0)
-            final_layer = layers.Identity(self.ctx)
+            final_layer = layers.Identity(self.ctx, self.logger)
             kwargs = {}
             kwargs['input_texture'] = 0
             kwargs['resolution'] = resolution
@@ -198,13 +206,14 @@ class RealTimeShaderApp(mglw.WindowConfig):
     title = "Real-Time Shader Loader"
     window_size = (1280, 720)
     resource_dir = os.path.normpath(os.path.join(os.path.dirname(__file__)))
+    logger = logging.getLogger(__name__)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
         config_path = './config.json'
 
-        self.layer_manager = LayerManager(self.ctx, config_path)
+        self.layer_manager = LayerManager(self.ctx, config_path, self.logger)
 
         samplerate = 44100  # Sample rate in Hz
         self.duration = 5  # Duration of each recording in seconds

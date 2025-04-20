@@ -1,3 +1,4 @@
+import logging
 import os
 
 import moderngl
@@ -20,8 +21,12 @@ class BaseLayer:
         pass
 
 class BaseShader(BaseLayer):
-    def __init__(self, ctx, **kwargs):
+    logger: logging.Logger
+    program: moderngl.Program
+
+    def __init__(self, ctx, logger, **kwargs):
         self.ctx = ctx
+        self.logger = logger
         self.kwargs = kwargs
         self.source_layer = True
         self.load_shader()
@@ -69,10 +74,7 @@ class BaseShader(BaseLayer):
         for k, val in kwargs.items():
             if k in self.program:
                 if isinstance(val, str):
-                    try:
-                        self.program[k] = eval(val, {}, {'fft': kwargs['fft'], 'np': np, 'time': kwargs['time']})
-                    except Exception as e:
-                        print(f"Error setting uniform {k}: {e}")
+                    self.program[k] = utils.eval_statement(val, kwargs, 1.0, k, self.logger)
                 else:
                     self.program[k] = val
         self.vao.render()
@@ -114,11 +116,12 @@ class BaseShader(BaseLayer):
         return f"{self.__class__.__name__}({self.kwargs})"
     
 class CustomShader(BaseShader):
-    def __init__(self, ctx, shader_name, **kwargs):
+    def __init__(self, ctx, logger, shader_name, **kwargs):
         self.shader_name = shader_name
         self.reload_shaders = False
         self.source_layer = True
         self.ctx = ctx
+        self.logger = logger
         self.kwargs = kwargs
         self.read_shader_files()
         self.frag_shader_event_handler, self.frag_shader_observer = utils.setup_observer(self.frag_shader_file_path, self, "fragment_file_changed")
@@ -198,12 +201,12 @@ class CustomShader(BaseShader):
 
 
 class PythonLayer(BaseShader):
-    def __init__(self, ctx, obj, **kwargs):
+    def __init__(self, ctx, logger, obj, **kwargs):
         assert hasattr(obj, "update"), "obj must have update method"
         assert hasattr(obj, "render"), "obj must have render method"
         self.obj = obj
         self.kwargs = kwargs
-        super().__init__(ctx)
+        super().__init__(ctx, logger)
     
     def get_fragment_shader(self):
         return """
@@ -557,8 +560,8 @@ class SolidColor(BaseShader):
         """
     
 class Osc(BaseShader):
-    def __init__(self, ctx, **kwargs):
-        super().__init__(ctx, **kwargs)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         # set defaults
         if 'scale' not in self.kwargs:
             self.kwargs['scale'] = 10

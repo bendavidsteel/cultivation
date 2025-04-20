@@ -1,4 +1,6 @@
-import json
+import math
+
+import numpy as np
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -24,3 +26,11 @@ def setup_observer(file_path, manager, cb_name):
     observer.start()
 
     return event_handler, observer
+
+def eval_statement(r, kwargs, default, expression_name, logger):
+    try:
+        r = eval(r, {}, {'fft': kwargs['fft'], 'time': kwargs['time'], 'np': np, 'math': math, 'sin': np.sin, 'cos': np.cos})
+    except Exception as e:
+        logger.error(f"Error evaluating {expression_name} expression: {e}")
+        r = default
+    return r

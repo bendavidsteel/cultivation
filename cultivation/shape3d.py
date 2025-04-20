@@ -33,6 +33,12 @@ class Primitives(BaseLayer):
                 # render black if error occurs
                 self.ctx.clear(0.0, 0.0, 0.0, 1.0)
 
+    def get_uniforms(self):
+        uniforms = []
+        for primitive in self.primitives:
+            uniforms += primitive.get_uniforms()
+        return uniforms
+
 class Shape3D(BaseShader):
     """Layer for rendering 3D primitive shapes"""
     
@@ -44,6 +50,11 @@ class Shape3D(BaseShader):
         self.color = kwargs.get('color', [1.0, 1.0, 1.0])
         self.use_lighting = kwargs.get('lighting', True)
         self.ambient_strength = kwargs.get('ambient_strength', 0.2)
+        
+        # New lighting parameters
+        self.specular_strength = kwargs.get('specular_strength', 0.5)
+        self.light_color = kwargs.get('light_color', [1.0, 1.0, 1.0])
+        self.light_position = kwargs.get('light_position', [2.0, 2.0, 2.0])
         
         self.shape_detail = kwargs.get('detail', 16)  # For spheres, cylinders
         self.source_layer = True
@@ -64,12 +75,24 @@ class Shape3D(BaseShader):
             self.rotation = [0.0, 0.0, 0.0]
         
         # Ensure color is a list of 3 elements
-        if not isinstance(self.color, list) or len(self.color) != 3:
+        if not (isinstance(self.color, str) or (isinstance(self.color, list) and len(self.color) == 3)):
             logger.warning(f"Invalid color format: {self.color}. Defaulting to [1.0, 1.0, 1.0]")
             self.color = [1.0, 1.0, 1.0]
+        
+        # Ensure light_color is a list of 3 elements if provided
+        if not isinstance(self.light_color, list) or len(self.light_color) != 3:
+            logger.warning(f"Invalid light_color format: {self.light_color}. Defaulting to [1.0, 1.0, 1.0]")
+            self.light_color = [1.0, 1.0, 1.0]
+        
+        # Ensure light_position is a list of 3 elements if provided
+        if not isinstance(self.light_position, list) or len(self.light_position) != 3:
+            logger.warning(f"Invalid light_position format: {self.light_position}. Defaulting to [2.0, 2.0, 2.0]")
+            self.light_position = [2.0, 2.0, 2.0]
             
         # Remove our custom params from kwargs before passing to parent
-        for key in ['shape_type', 'size', 'position', 'rotation', 'color', 'lighting', 'detail']:
+        for key in ['shape_type', 'size', 'position', 'rotation', 'color', 'lighting', 'detail',
+                    'ambient_strength', 'specular_strength', 'light_color', 'light_position', 
+                    'light_follow_camera', 'shininess', 'texture']:
             if key in kwargs:
                 kwargs.pop(key)
 
@@ -168,14 +191,25 @@ class Shape3D(BaseShader):
         model = model * glm.translate(glm.mat4(1.0), glm.vec3(*real_pos))
 
         # evaluate colour
-        real_color = []
-        for c in self.color:
-            if isinstance(c, str):
-                # Handle color expressions
-                c = utils.eval_statement(c, kwargs, 1.0, 'color', self.logger)
-            elif isinstance(c, int):
-                c = float(c)
-            real_color.append(float(c))
+        use_color_texture = False
+        if isinstance(self.color, str):
+            if self.color in kwargs:
+                use_color_texture = True
+            else:
+                self.logger.warning(f"Color {self.color} not found in kwargs. Defaulting to [1.0, 1.0, 1.0]")
+                real_color = [1.0, 1.0, 1.0]
+        elif isinstance(self.color, list) and len(self.color) == 3:
+            real_color = []
+            for c in self.color:
+                if isinstance(c, str):
+                    # Handle color expressions
+                    c = utils.eval_statement(c, kwargs, 1.0, 'color', self.logger)
+                elif isinstance(c, int):
+                    c = float(c)
+                real_color.append(float(c))
+        else:
+            self.logger.warning(f"Invalid color format: {self.color}. Defaulting to [1.0, 1.0, 1.0]")
+            real_color = [1.0, 1.0, 1.0]
         
         # Set uniforms
         if 'model_matrix' in self.program:
@@ -184,12 +218,26 @@ class Shape3D(BaseShader):
             self.program['view_matrix'].write(view)
         if 'proj_matrix' in self.program:
             self.program['proj_matrix'].write(proj)
-        if 'color' in self.program:
-            self.program['color'] = tuple(real_color)
+        if use_color_texture:
+            self.program['use_texture'] = True
+            self.program['texture_source'] = kwargs[self.color]
+        else:
+            if 'color' in self.program:
+                self.program['color'] = tuple(real_color)
         if 'time' in self.program:
             self.program['time'] = time
         if 'use_lighting' in self.program:
             self.program['use_lighting'] = self.use_lighting
+        
+        uniform_names = ['ambient_strength', 'specular_strength', 'light_color', 'light_position']
+        for name in uniform_names:
+            if name in self.program:
+                if name in ['light_position', 'light_color']:
+                    # Handle light position as a list
+                    self.program[name] = tuple(getattr(self, name))
+                else:
+                    # Handle other lighting parameters
+                    self.program[name] = getattr(self, name)
         
         # Set other uniforms from kwargs
         for k, val in kwargs.items():
@@ -223,58 +271,77 @@ class Shape3D(BaseShader):
 
         out vec3 v_normal;
         out vec3 v_position;
+        out vec3 local_pos;
 
         void main() {
             v_normal = mat3(model_matrix) * in_normal;
             vec4 world_pos = model_matrix * vec4(in_position, 1.0);
             v_position = world_pos.xyz;
+            local_pos = in_position; // Assigning in_position to local_pos
             gl_Position = proj_matrix * view_matrix * world_pos;
         }
         """
     
     def get_fragment_shader(self):
         return """
-        #version 330
+            #version 330
 
-        uniform vec3 color;
-        uniform bool use_lighting;
-        uniform float time;
+            uniform vec3 color;
+            uniform bool use_lighting;
+            uniform float time;
 
-        in vec3 v_normal;
-        in vec3 v_position;
-        
-        out vec4 frag_color;
+            // Lighting uniforms
+            uniform float ambient_strength;
+            uniform float specular_strength;
+            uniform vec3 light_color;
+            uniform vec3 light_position;
+            uniform float shininess;
 
-        void main() {
-            vec3 base_color = color;
-            
-            if (use_lighting) {
-                // Simple lighting calculation
-                vec3 light_pos = vec3(2.0 * sin(time), 2.0, 2.0 * cos(time));
-                vec3 light_color = vec3(1.0, 1.0, 1.0);
+            // Texture uniforms
+            uniform bool use_texture;
+            uniform sampler2D texture_source;
+
+            in vec3 v_normal;
+            in vec3 v_position;
+            in vec3 local_pos;
+
+            out vec4 frag_color;
+
+            void main() {
+                vec3 base_color = color; // Initialize base_color with color
+
+                // Apply texture if available
+                if (use_texture) {
+                    vec2 uv = local_pos.xy + 0.5;  // Simple UV mapping
+                    base_color = texture(texture_source, uv).rgb;
+                } else {
+                    base_color = color; // Ensure base_color is set to color if not using texture
+                }
                 
-                // Ambient
-                float ambient_strength = 0.2;
-                vec3 ambient = ambient_strength * light_color;
+                if (use_lighting) {
+                    // Use the provided light position
+                    vec3 light_pos = light_position;
+                    
+                    // Ambient
+                    vec3 ambient = ambient_strength * light_color;
+                    
+                    // Diffuse
+                    vec3 norm = normalize(v_normal);
+                    vec3 light_dir = normalize(light_pos - v_position);
+                    float diff = max(dot(norm, light_dir), 0.0);
+                    vec3 diffuse = diff * light_color;
+                    
+                    // Specular
+                    vec3 view_dir = normalize(vec3(0.0, 0.0, 3.0) - v_position);
+                    vec3 reflect_dir = reflect(-light_dir, norm);
+                    float spec = pow(max(dot(view_dir, reflect_dir), 0.0), shininess);
+                    vec3 specular = specular_strength * spec * light_color;
+                    
+                    base_color = (ambient + diffuse + specular) * base_color;
+                }
                 
-                // Diffuse
-                vec3 norm = normalize(v_normal);
-                vec3 light_dir = normalize(light_pos - v_position);
-                float diff = max(dot(norm, light_dir), 0.0);
-                vec3 diffuse = diff * light_color;
-                
-                // Specular
-                float specular_strength = 0.5;
-                vec3 view_dir = normalize(vec3(0.0, 0.0, 3.0) - v_position);
-                vec3 reflect_dir = reflect(-light_dir, norm);
-                float spec = pow(max(dot(view_dir, reflect_dir), 0.0), 32);
-                vec3 specular = specular_strength * spec * light_color;
-                
-                base_color = (ambient + diffuse + specular) * base_color;
+                frag_color = vec4(base_color, 1.0);
             }
-            
-            frag_color = vec4(base_color, 1.0);
-        }
         """
     
     def _generate_cube(self):

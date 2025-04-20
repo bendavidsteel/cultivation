@@ -27,11 +27,11 @@ class LayerManager:
         self.event_handler, self.observer = utils.setup_observer(config_path, self, "load_config")
 
         self.ctx = ctx
-        self.outputs = {}
+        self.outputs = {}  # Config for each output
+        self.layers = {}   # Actual layers for each output
+        self.textures = {}  # Textures for each output
+        self.framebuffers = {}  # Framebuffers for each output
         self.update_layers = False
-
-        self.textures = []
-        self.framebuffers = []
 
         self.premade_shader_map = {
             'solid': layers.SolidColor,
@@ -99,44 +99,63 @@ class LayerManager:
     def update(self):
         try:
             if self.update_layers:
-                for layer, texture, framebuffer in zip(self.layers, self.textures, self.framebuffers):
-                    layer.exit()
-                    texture.release()
-                    framebuffer.release()
+                # Clean up existing resources
+                for output_name, output_layers in self.layers.items():
+                    for layer in output_layers:
+                        layer.exit()
+                    
+                    if output_name in self.textures:
+                        for texture in self.textures[output_name]:
+                            texture.release()
+                    
+                    if output_name in self.framebuffers:
+                        for framebuffer in self.framebuffers[output_name]:
+                            framebuffer.release()
+                
+                # Initialize new collections
+                self.layers = {}
+                self.textures = {}
+                self.framebuffers = {}
+                
+                # Create layers for each output
+                for output_name, layers_info in self.outputs.items():
+                    self.layers[output_name] = []
+                    self.textures[output_name] = []
+                    self.framebuffers[output_name] = []
+                    
+                    for layer_info in layers_info:
+                        layer_name = layer_info['name']
+                        layer_kwargs = {k: v for k, v in layer_info.items() if k != 'name'}
 
-                self.layers = []
-                self.textures = []
-                self.framebuffers = []
-                for layer_info in self.layers_info:
-                    layer_name = layer_info['name']
-                    layer_kwargs = {k: v for k, v in layer_info.items() if k != 'name'}
+                        try:
+                            # check to see what kind of layer this is
+                            if layer_name == 'primitives':
+                                new_layer = shape3d.Primitives(self.ctx, self.logger, **layer_kwargs)
+                            elif layer_name in self.premade_shader_map:
+                                new_layer = self.premade_shader_map[layer_name](self.ctx, self.logger, **layer_kwargs)
+                            elif layer_name in self.python_obj_map:
+                                new_layer = layers.PythonLayer(self.ctx, self.logger, self.python_obj_map[layer_name], **layer_kwargs)
+                            else:
+                                new_layer = layers.CustomShader(self.ctx, self.logger, layer_name, **layer_kwargs)
 
-                    try:
-                        # check to see what kind of layer this is
-                        if layer_name == 'primitives':
-                            new_layer = shape3d.Primitives(self.ctx, self.logger, **layer_kwargs)
-                        elif layer_name in self.premade_shader_map:
-                            new_layer = self.premade_shader_map[layer_name](self.ctx, self.logger, **layer_kwargs)
-                        elif layer_name in self.python_obj_map:
-                            new_layer = layers.PythonLayer(self.ctx, self.logger, self.python_obj_map[layer_name], **layer_kwargs)
-                        else:
-                            new_layer = layers.CustomShader(self.ctx, self.logger, layer_name, **layer_kwargs)
+                            if len(self.layers[output_name]) == 0:
+                                assert new_layer.source_layer, f"First layer {new_layer} must be a source layer"
 
-                        if len(self.layers) == 0:
-                            assert new_layer.source_layer, f"First layer {new_layer} must be a source layer"
-
-                        self.layers.append(new_layer)
-                        texture = self.ctx.texture((self.ctx.screen.width, self.ctx.screen.height), 4)
-                        self.textures.append(texture)
-                        framebuffer = self.ctx.framebuffer(color_attachments=[texture])
-                        self.framebuffers.append(framebuffer)
-                    except Exception as e:
-                        self.logger.error(f"Error creating layer {layer_name}: {e}")
+                            self.layers[output_name].append(new_layer)
+                            texture = self.ctx.texture((self.ctx.screen.width, self.ctx.screen.height), 4)
+                            self.textures[output_name].append(texture)
+                            framebuffer = self.ctx.framebuffer(color_attachments=[texture])
+                            self.framebuffers[output_name].append(framebuffer)
+                        except Exception as e:
+                            self.logger.error(f"Error creating layer {layer_name}: {e}")
+                    
                 self.update_layers = False
 
-            for layer in self.layers:
-                layer.update()
-                    
+            # Update all layers
+            for output_name, output_layers in self.layers.items():
+                for layer in output_layers:
+                    layer.update()
+                        
         except Exception as e:
             self.logger.error(f"Error loading layers at {datetime.datetime.now()}: {e}, {traceback.format_exc()}")
             self.successful_load = False
@@ -158,41 +177,70 @@ class LayerManager:
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.enable(moderngl.CULL_FACE)
         
-        for i, layer, framebuffer in zip(range(len(self.layers)), self.layers, self.framebuffers):
-            # First shader renders to the first framebuffer
-            framebuffer.use()
-            self.ctx.clear(0.0, 0.0, 0.0, 1.0)
-            kwargs = {}
-            if hasattr(layer, 'get_uniforms') and 'input_texture' in layer.get_uniforms() and len(self.layers) > 1:
-                self.textures[i-1].use(location=0)
-                kwargs['input_texture'] = 0
-
-            if hasattr(layer, 'get_uniforms') and 'other_texture' in layer.get_uniforms():
-                self.textures[-1].use(location=1)
-                kwargs['other_texture'] = 1
-
-            kwargs['fft'] = fft
-            kwargs['resolution'] = resolution
-            kwargs['time'] = time
-            try:
-                layer.render(**kwargs)
-            except Exception as e:
-                self.logger.error(f"Error rendering layer {layer}: {e}")
-                # render black if error occurs
+        # Dictionary to track the final texture of each output for this frame
+        final_textures = {}
+        
+        # Process each output
+        for output_name, output_layers in self.layers.items():
+            if not output_layers:
+                continue
+            
+            output_textures = self.textures[output_name]
+            output_framebuffers = self.framebuffers[output_name]
+            
+            for i, (layer, framebuffer) in enumerate(zip(output_layers, output_framebuffers)):
+                # Render to the framebuffer
+                framebuffer.use()
                 self.ctx.clear(0.0, 0.0, 0.0, 1.0)
-
-
-        # render final framebuffer to screen
-        if len(self.layers) > 0:
+                
+                kwargs = {}
+                
+                # Use the previous texture in this output's chain as input if available
+                if hasattr(layer, 'get_uniforms') and 'input_texture' in layer.get_uniforms() and i > 0:
+                    output_textures[i-1].use(location=0)
+                    kwargs['input_texture'] = 0
+                
+                # Make all outputs' final textures available as uniforms
+                texture_location = 1
+                for other_output in self.layers.keys():
+                    # Skip if output doesn't exist yet
+                    if other_output not in self.textures or not self.textures[other_output]:
+                        continue
+                    
+                    # Use the final texture from the previous frame
+                    other_final_texture = self.textures[other_output][-1]
+                    other_final_texture.use(location=texture_location)
+                    kwargs[other_output] = texture_location
+                    texture_location += 1
+                
+                # Add standard parameters
+                kwargs['fft'] = fft
+                kwargs['resolution'] = resolution
+                kwargs['time'] = time
+                
+                try:
+                    layer.render(**kwargs)
+                except Exception as e:
+                    self.logger.error(f"Error rendering layer {layer} for output {output_name}: {e}")
+                    # render last layer if error occurs
+                    output_textures[i-1].use(location=0)
+                    final_layer = layers.Identity(self.ctx, self.logger)
+                    kwargs = {'input_texture': 0, 'resolution': resolution}
+                    final_layer.render(**kwargs)
+                    
+            # Store the final texture for this output
+            if output_textures:
+                final_textures[output_name] = output_textures[-1]
+        
+        # Render o0 to the screen if it exists
+        if 'o0' in final_textures:
             self.ctx.screen.use()
             self.ctx.clear(0.0, 0.0, 0.0, 1.0)
-            self.textures[-1].use(location=0)
+            final_textures['o0'].use(location=0)
             final_layer = layers.Identity(self.ctx, self.logger)
-            kwargs = {}
-            kwargs['input_texture'] = 0
-            kwargs['resolution'] = resolution
+            kwargs = {'input_texture': 0, 'resolution': resolution}
             final_layer.render(**kwargs)
-            
+        
         # Reset 3D state
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.ctx.disable(moderngl.CULL_FACE)

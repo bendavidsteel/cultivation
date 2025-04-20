@@ -69,7 +69,6 @@ class BaseShader(BaseLayer):
         )
 
     def render(self, **kwargs):
-        fft = kwargs.get('fft', None)
         kwargs.update(self.kwargs)
         for k, val in kwargs.items():
             if k in self.program:

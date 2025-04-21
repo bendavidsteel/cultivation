@@ -17,10 +17,12 @@ class Primitives(BaseLayer):
         self.primitives = []
         self.logger = logger
         self.ctx = ctx
-        
+        primitives_kwargs = kwargs.copy()
+        primitives_kwargs.pop('shapes', None)
 
         for primitive in kwargs.get('shapes', []):
-            shape = Shape3D(ctx, logger, **primitive)
+            primitive_kwargs = primitive | primitives_kwargs
+            shape = Shape3D(ctx, logger, **primitive_kwargs)
             self.primitives.append(shape)
         self.source_layer = True
 
@@ -48,13 +50,14 @@ class Shape3D(BaseShader):
         self.position = kwargs.get('position', [0.0, 0.0, 0.0])
         self.rotation = kwargs.get('rotation', [0.0, 0.0, 0.0])
         self.color = kwargs.get('color', [1.0, 1.0, 1.0])
-        self.use_lighting = kwargs.get('lighting', True)
-        self.ambient_strength = kwargs.get('ambient_strength', 0.2)
         
         # New lighting parameters
-        self.specular_strength = kwargs.get('specular_strength', 0.5)
+        self.use_lighting = kwargs.get('lighting', True)
+        self.ambient_strength = kwargs.get('ambient_light', 0.2)
+        self.specular_strength = kwargs.get('specular_light', 0.5)
         self.light_color = kwargs.get('light_color', [1.0, 1.0, 1.0])
         self.light_position = kwargs.get('light_position', [2.0, 2.0, 2.0])
+        self.camera_position = kwargs.get('camera_position', [0.0, 0.0, 3.0])
         
         self.shape_detail = kwargs.get('detail', 16)  # For spheres, cylinders
         self.source_layer = True
@@ -137,9 +140,18 @@ class Shape3D(BaseShader):
         # Create projection matrix (perspective)
         proj = glm.perspective(math.radians(45.0), aspect_ratio, 0.1, 100.0)
         
+        real_camera = []
+        for p in self.camera_position:
+            if isinstance(p, str):
+                # Handle camera position expressions
+                p = utils.eval_statement(p, kwargs, 0.0, 'camera_position', self.logger)
+            elif isinstance(p, int):
+                p = float(p)
+            real_camera.append(float(p))
+
         # Create view matrix (camera)
         view = glm.lookAt(
-            glm.vec3(0.0, 0.0, 3.0),  # Camera position
+            glm.vec3(*real_camera),  # Camera position
             glm.vec3(0.0, 0.0, 0.0),  # Look at
             glm.vec3(0.0, 1.0, 0.0)   # Up vector
         )
@@ -253,9 +265,7 @@ class Shape3D(BaseShader):
                     self.program[k] = val
         
         # Render the shape
-        self.ctx.enable(moderngl.DEPTH_TEST)
         self.vao.render()
-        self.ctx.disable(moderngl.DEPTH_TEST)
         
     def get_vertex_shader(self):
         return """

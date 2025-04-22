@@ -259,6 +259,13 @@ class RealTimeShaderApp(mglw.WindowConfig):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        ch.setFormatter(formatter)
+        self.logger.addHandler(ch)
+        self.logger.setLevel(logging.DEBUG)
+
         config_path = './config.json'
 
         self.layer_manager = LayerManager(self.ctx, config_path, self.logger)

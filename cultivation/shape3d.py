@@ -53,6 +53,7 @@ class Shape3D(BaseShader):
         
         # New lighting parameters
         self.use_lighting = kwargs.get('lighting', True)
+        self.shininess = kwargs.get('shininess', 32.0)
         self.ambient_strength = kwargs.get('ambient_light', 0.2)
         self.specular_strength = kwargs.get('specular_light', 0.5)
         self.light_color = kwargs.get('light_color', [1.0, 1.0, 1.0])
@@ -95,7 +96,7 @@ class Shape3D(BaseShader):
         # Remove our custom params from kwargs before passing to parent
         for key in ['shape_type', 'size', 'position', 'rotation', 'color', 'lighting', 'detail',
                     'ambient_strength', 'specular_strength', 'light_color', 'light_position', 
-                    'light_follow_camera', 'shininess', 'texture']:
+                    'light_follow_camera', 'shininess', 'texture', 'camera_position']:
             if key in kwargs:
                 kwargs.pop(key)
 
@@ -230,6 +231,8 @@ class Shape3D(BaseShader):
             self.program['view_matrix'].write(view)
         if 'proj_matrix' in self.program:
             self.program['proj_matrix'].write(proj)
+        if 'camera_position' in self.program:
+            self.program['camera_position'].write(glm.vec3(*real_camera))
         if use_color_texture:
             self.program['use_texture'] = True
             self.program['texture_source'] = kwargs[self.color]
@@ -241,15 +244,28 @@ class Shape3D(BaseShader):
         if 'use_lighting' in self.program:
             self.program['use_lighting'] = self.use_lighting
         
-        uniform_names = ['ambient_strength', 'specular_strength', 'light_color', 'light_position']
+        uniform_names = ['ambient_strength', 'specular_strength', 'shininess', 'light_color', 'light_position']
         for name in uniform_names:
             if name in self.program:
                 if name in ['light_position', 'light_color']:
                     # Handle light position as a list
-                    self.program[name] = tuple(getattr(self, name))
+                    param = getattr(self, name)
+                    real_param = []
+                    for p in param:
+                        if isinstance(p, str):
+                            # Handle light position expressions
+                            p = utils.eval_statement(p, kwargs, 0.0, name, self.logger)
+                        elif isinstance(p, int):
+                            p = float(p)
+                        real_param.append(float(p))
+                    self.program[name] = tuple(real_param)
                 else:
                     # Handle other lighting parameters
-                    self.program[name] = getattr(self, name)
+                    param = getattr(self, name)
+                    if isinstance(param, str):
+                        # Handle lighting parameter expressions
+                        param = utils.eval_statement(param, kwargs, 1.0, name, self.logger)
+                    self.program[name] = param
         
         # Set other uniforms from kwargs
         for k, val in kwargs.items():
@@ -261,6 +277,16 @@ class Shape3D(BaseShader):
             if k in self.program:
                 if isinstance(val, str):
                     self.program[k] = utils.eval_statement(val, kwargs, 1.0, k, self.logger)
+                elif isinstance(val, list):
+                    real_val = []
+                    for v in val:
+                        if isinstance(v, str):
+                            # Handle custom parameter expressions
+                            v = utils.eval_statement(v, kwargs, 1.0, k, self.logger)
+                        elif isinstance(v, int):
+                            v = float(v)
+                        real_val.append(float(v))
+                    self.program[k] = tuple(real_val)
                 else:
                     self.program[k] = val
         
@@ -305,6 +331,7 @@ class Shape3D(BaseShader):
             uniform float specular_strength;
             uniform vec3 light_color;
             uniform vec3 light_position;
+            uniform vec3 camera_position;
             uniform float shininess;
 
             // Texture uniforms
@@ -342,7 +369,7 @@ class Shape3D(BaseShader):
                     vec3 diffuse = diff * light_color;
                     
                     // Specular
-                    vec3 view_dir = normalize(vec3(0.0, 0.0, 3.0) - v_position);
+                    vec3 view_dir = normalize(camera_position - v_position);
                     vec3 reflect_dir = reflect(-light_dir, norm);
                     float spec = pow(max(dot(view_dir, reflect_dir), 0.0), shininess);
                     vec3 specular = specular_strength * spec * light_color;

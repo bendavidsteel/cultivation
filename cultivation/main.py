@@ -223,7 +223,6 @@ class LayerManager:
                 except Exception as e:
                     self.logger.error(f"Error rendering layer {layer} for output {output_name}: {e}")
                     # render last layer if error occurs
-                    output_textures[i-1].use(location=0)
                     final_layer = layers.Identity(self.ctx, self.logger)
                     kwargs = {'input_texture': 0, 'resolution': resolution}
                     final_layer.render(**kwargs)

@@ -3,11 +3,13 @@ import logging
 import math
 
 import glm
+import moderngl_window.geometry
 import numpy as np
 import moderngl
+import moderngl_window
 import trimesh
 
-from layers import BaseShader, BaseLayer
+from layers import BaseShader, BaseLayer, Identity
 import utils
 
 
@@ -22,18 +24,20 @@ class Primitives(BaseLayer):
 
         for primitive in kwargs.get('shapes', []):
             primitive_kwargs = primitive | primitives_kwargs
+            primitive_kwargs['shape_type'] = primitive.get('name', 'cube')
             shape = Shape3D(ctx, logger, **primitive_kwargs)
             self.primitives.append(shape)
         self.source_layer = True
 
     def render(self, **kwargs):
+        final_layer = Identity(self.ctx, self.logger)
+        final_layer.render(**kwargs)
+
         for primitive in self.primitives:
             try:
                 primitive.render(**kwargs)
             except Exception as e:
                 self.logger.error(f"Error rendering primitive {primitive}: {e}")
-                # render black if error occurs
-                self.ctx.clear(0.0, 0.0, 0.0, 1.0)
 
     def get_uniforms(self):
         uniforms = []
@@ -103,33 +107,25 @@ class Shape3D(BaseShader):
         super().__init__(ctx, logger, **kwargs)
         
     def load_vao(self):
-        # Generate shape vertices based on type
+        # Get vertices based on shape type
         if self.shape_type == 'cube':
-            vertices, indices = self._generate_cube()
+            vao = moderngl_window.geometry.cube()
         elif self.shape_type == 'sphere':
-            vertices, indices = self._generate_sphere(self.shape_detail)
+            vao = moderngl_window.geometry.sphere()
         elif self.shape_type == 'cylinder':
+            raise NotImplementedError("Cylinder shape generation is not implemented yet.")
             vertices, indices = self._generate_cylinder(self.shape_detail)
         elif self.shape_type == 'plane':
-            vertices, indices = self._generate_plane()
+            vao = moderngl_window.geometry.quad_2d()
         elif self.shape_type == 'torus':
+            raise NotImplementedError("Torus shape generation is not implemented yet.")
             vertices, indices = self._generate_torus(self.shape_detail)
         else:
             # Default to cube if unknown
-            vertices, indices = self._generate_cube()
+            vao = moderngl_window.geometry.cube()
             
-        # Load vertices and indices into buffers
-        self.vbo = self.ctx.buffer(vertices.astype('f4'))
-        self.ibo = self.ctx.buffer(indices.astype('i4'))
-        
-        # Create vertex array with position, normal attributes
-        self.vao = self.ctx.vertex_array(
-            self.program,
-            [
-                (self.vbo, '3f 3f', 'in_position', 'in_normal')
-            ],
-            self.ibo
-        )
+        # Load vertices into buffer
+        self.vao = vao
         
     def render(self, **kwargs):
         # Set uniforms from kwargs
@@ -289,9 +285,9 @@ class Shape3D(BaseShader):
                     self.program[k] = tuple(real_val)
                 else:
                     self.program[k] = val
-        
+
         # Render the shape
-        self.vao.render()
+        self.vao.render(self.program)
         
     def get_vertex_shader(self):
         return """
@@ -310,7 +306,8 @@ class Shape3D(BaseShader):
         out vec3 local_pos;
 
         void main() {
-            v_normal = mat3(model_matrix) * in_normal;
+            vec4 world_normal = model_matrix * vec4(in_normal, 1.0);
+            v_normal = world_normal.xyz;
             vec4 world_pos = model_matrix * vec4(in_position, 1.0);
             v_position = world_pos.xyz;
             local_pos = in_position; // Assigning in_position to local_pos
@@ -382,199 +379,360 @@ class Shape3D(BaseShader):
         """
     
     def _generate_cube(self):
-        # Vertices (position + normal) for a cube centered at origin
-        vertices = np.array([
-            # Front face
-            -0.5, -0.5,  0.5,  0.0,  0.0,  1.0,  # Bottom-left
-             0.5, -0.5,  0.5,  0.0,  0.0,  1.0,  # Bottom-right
-             0.5,  0.5,  0.5,  0.0,  0.0,  1.0,  # Top-right
-            -0.5,  0.5,  0.5,  0.0,  0.0,  1.0,  # Top-left
-            
-            # Back face
-            -0.5, -0.5, -0.5,  0.0,  0.0, -1.0,  # Bottom-left
-             0.5, -0.5, -0.5,  0.0,  0.0, -1.0,  # Bottom-right
-             0.5,  0.5, -0.5,  0.0,  0.0, -1.0,  # Top-right
-            -0.5,  0.5, -0.5,  0.0,  0.0, -1.0,  # Top-left
-            
-            # Right face
-             0.5, -0.5, -0.5,  1.0,  0.0,  0.0,  # Bottom-left
-             0.5, -0.5,  0.5,  1.0,  0.0,  0.0,  # Bottom-right
-             0.5,  0.5,  0.5,  1.0,  0.0,  0.0,  # Top-right
-             0.5,  0.5, -0.5,  1.0,  0.0,  0.0,  # Top-left
-            
-            # Left face
-            -0.5, -0.5, -0.5, -1.0,  0.0,  0.0,  # Bottom-left
-            -0.5, -0.5,  0.5, -1.0,  0.0,  0.0,  # Bottom-right
-            -0.5,  0.5,  0.5, -1.0,  0.0,  0.0,  # Top-right
-            -0.5,  0.5, -0.5, -1.0,  0.0,  0.0,  # Top-left
-            
-            # Top face
-            -0.5,  0.5,  0.5,  0.0,  1.0,  0.0,  # Bottom-left
-             0.5,  0.5,  0.5,  0.0,  1.0,  0.0,  # Bottom-right
-             0.5,  0.5, -0.5,  0.0,  1.0,  0.0,  # Top-right
-            -0.5,  0.5, -0.5,  0.0,  1.0,  0.0,  # Top-left
-            
-            # Bottom face
-            -0.5, -0.5,  0.5,  0.0, -1.0,  0.0,  # Bottom-left
-             0.5, -0.5,  0.5,  0.0, -1.0,  0.0,  # Bottom-right
-             0.5, -0.5, -0.5,  0.0, -1.0,  0.0,  # Top-right
-            -0.5, -0.5, -0.5,  0.0, -1.0,  0.0,  # Top-left
-        ], dtype='f4')
+        """Generate a cube with 36 vertices (no indexing)"""
+        # Position and normal data separate rather than interleaved
+
+        center = [0.0, 0.0, 0.0]
+        width, height, depth = 1, 1, 1
+
+        pos = np.array([
+            center[0] + width, center[1] - height, center[2] + depth,
+            center[0] + width, center[1] + height, center[2] + depth,
+            center[0] - width, center[1] - height, center[2] + depth,
+            center[0] + width, center[1] + height, center[2] + depth,
+            center[0] - width, center[1] + height, center[2] + depth,
+            center[0] - width, center[1] - height, center[2] + depth,
+            center[0] + width, center[1] - height, center[2] - depth,
+            center[0] + width, center[1] + height, center[2] - depth,
+            center[0] + width, center[1] - height, center[2] + depth,
+            center[0] + width, center[1] + height, center[2] - depth,
+            center[0] + width, center[1] + height, center[2] + depth,
+            center[0] + width, center[1] - height, center[2] + depth,
+            center[0] + width, center[1] - height, center[2] - depth,
+            center[0] + width, center[1] - height, center[2] + depth,
+            center[0] - width, center[1] - height, center[2] + depth,
+            center[0] + width, center[1] - height, center[2] - depth,
+            center[0] - width, center[1] - height, center[2] + depth,
+            center[0] - width, center[1] - height, center[2] - depth,
+            center[0] - width, center[1] - height, center[2] + depth,
+            center[0] - width, center[1] + height, center[2] + depth,
+            center[0] - width, center[1] + height, center[2] - depth,
+            center[0] - width, center[1] - height, center[2] + depth,
+            center[0] - width, center[1] + height, center[2] - depth,
+            center[0] - width, center[1] - height, center[2] - depth,
+            center[0] + width, center[1] + height, center[2] - depth,
+            center[0] + width, center[1] - height, center[2] - depth,
+            center[0] - width, center[1] - height, center[2] - depth,
+            center[0] + width, center[1] + height, center[2] - depth,
+            center[0] - width, center[1] - height, center[2] - depth,
+            center[0] - width, center[1] + height, center[2] - depth,
+            center[0] + width, center[1] + height, center[2] - depth,
+            center[0] - width, center[1] + height, center[2] - depth,
+            center[0] + width, center[1] + height, center[2] + depth,
+            center[0] - width, center[1] + height, center[2] - depth,
+            center[0] - width, center[1] + height, center[2] + depth,
+            center[0] + width, center[1] + height, center[2] + depth,
+        ], dtype=np.float32)
+
+        normal_data = np.array([
+            -0, 0, 1,
+            -0, 0, 1,
+            -0, 0, 1,
+            0, 0, 1,
+            0, 0, 1,
+            0, 0, 1,
+            1, 0, 0,
+            1, 0, 0,
+            1, 0, 0,
+            1, 0, 0,
+            1, 0, 0,
+            1, 0, 0,
+            0, -1, 0,
+            0, -1, 0,
+            0, -1, 0,
+            0, -1, 0,
+            0, -1, 0,
+            0, -1, 0,
+            -1, -0, 0,
+            -1, -0, 0,
+            -1, -0, 0,
+            -1, -0, 0,
+            -1, -0, 0,
+            -1, -0, 0,
+            0, 0, -1,
+            0, 0, -1,
+            0, 0, -1,
+            0, 0, -1,
+            0, 0, -1,
+            0, 0, -1,
+            0, 1, 0,
+            0, 1, 0,
+            0, 1, 0,
+            0, 1, 0,
+            0, 1, 0,
+            0, 1, 0,
+        ], dtype=np.float32)
         
-        # Indices for drawing the cube using triangles
-        indices = np.array([
-            0, 1, 2, 2, 3, 0,     # Front face
-            4, 5, 6, 6, 7, 4,     # Back face
-            8, 9, 10, 10, 11, 8,  # Right face
-            12, 13, 14, 14, 15, 12,  # Left face
-            16, 17, 18, 18, 19, 16,  # Top face
-            20, 21, 22, 22, 23, 20,  # Bottom face
-        ], dtype='i4')
+        # # Interleave position and normal data
+        # vertices = np.zeros(36 * 6, dtype='f4')
+        # for i in range(36):
+        #     vertices[i*6:i*6+3] = positions[i*3:i*3+3]  # Position
+        #     vertices[i*6+3:i*6+6] = normals[i*3:i*3+3]  # Normal
         
-        return vertices, indices
+        # # No indices needed - we're using direct rendering
+        indices = np.array([], dtype='i4')
+        # Interleave position and normal data
+        return np.stack([pos.reshape((-1, 3)), normal_data.reshape((-1, 3))], axis=-1), indices
     
     def _generate_sphere(self, segments=16):
-        """Generate a UV sphere with the given number of segments"""
+        """Generate a UV sphere with direct rendering approach"""
         vertices = []
-        indices = []
         
-        # Generate vertices
-        for i in range(segments + 1):
-            for j in range(segments):
-                theta = i * np.pi / segments
-                phi = j * 2 * np.pi / segments
-                
-                x = np.sin(theta) * np.cos(phi)
-                y = np.cos(theta)
-                z = np.sin(theta) * np.sin(phi)
-                
-                # Position and normal (same for sphere)
-                vertices.extend([x, y, z, x, y, z])
-        
-        # Generate indices
+        # Generate vertices in triangles
         for i in range(segments):
             for j in range(segments):
-                first = i * (segments) + j
-                second = first + segments
+                # Calculate the four corners of a quad on the sphere
+                theta1 = i * np.pi / segments
+                theta2 = (i + 1) * np.pi / segments
+                phi1 = j * 2 * np.pi / segments
+                phi2 = (j + 1) * 2 * np.pi / segments
                 
-                indices.extend([first, second, first + 1])
-                indices.extend([second, second + 1, first + 1])
+                # Vertex 1 (top-left)
+                x1 = np.sin(theta1) * np.cos(phi1)
+                y1 = np.cos(theta1)
+                z1 = np.sin(theta1) * np.sin(phi1)
+                
+                # Vertex 2 (bottom-left)
+                x2 = np.sin(theta2) * np.cos(phi1)
+                y2 = np.cos(theta2)
+                z2 = np.sin(theta2) * np.sin(phi1)
+                
+                # Vertex 3 (bottom-right)
+                x3 = np.sin(theta2) * np.cos(phi2)
+                y3 = np.cos(theta2)
+                z3 = np.sin(theta2) * np.sin(phi2)
+                
+                # Vertex 4 (top-right)
+                x4 = np.sin(theta1) * np.cos(phi2)
+                y4 = np.cos(theta1)
+                z4 = np.sin(theta1) * np.sin(phi2)
+                
+                # Add first triangle (top-left, bottom-left, bottom-right)
+                vertices.extend([x1, y1, z1, x1, y1, z1])  # position, normal
+                vertices.extend([x2, y2, z2, x2, y2, z2])
+                vertices.extend([x3, y3, z3, x3, y3, z3])
+                
+                # Add second triangle (top-left, bottom-right, top-right)
+                vertices.extend([x1, y1, z1, x1, y1, z1])
+                vertices.extend([x3, y3, z3, x3, y3, z3])
+                vertices.extend([x4, y4, z4, x4, y4, z4])
         
-        return np.array(vertices, dtype='f4'), np.array(indices, dtype='i4')
-    
+        # For a sphere, the position and normal are the same (normalized)
+        return np.array(vertices, dtype='f4'), np.array([], dtype='i4')
+
     def _generate_cylinder(self, segments=16):
-        """Generate a cylinder with the given number of segments"""
+        """Generate a cylinder with direct rendering approach"""
         vertices = []
-        indices = []
         
-        # Generate circle points
+        # 1. Generate the side vertices and triangles
         for i in range(segments):
-            angle = i * 2 * np.pi / segments
-            x = np.cos(angle)
-            z = np.sin(angle)
+            angle1 = i * 2 * np.pi / segments
+            angle2 = ((i + 1) % segments) * 2 * np.pi / segments
             
-            # Top circle vertex
-            nx = x
-            ny = 0.0
-            nz = z
-            vertices.extend([x, 0.5, z, nx, ny, nz])
+            # Calculate positions
+            x1 = np.cos(angle1)  # Top point 1
+            z1 = np.sin(angle1)
+            y1 = 0.5
             
-            # Bottom circle vertex
-            vertices.extend([x, -0.5, z, nx, ny, nz])
+            x2 = np.cos(angle1)  # Bottom point 1
+            z2 = np.sin(angle1)
+            y2 = -0.5
             
-            # Top cap normal
-            vertices.extend([x, 0.5, z, 0.0, 1.0, 0.0])
+            x3 = np.cos(angle2)  # Bottom point 2
+            z3 = np.sin(angle2)
+            y3 = -0.5
             
-            # Bottom cap normal
-            vertices.extend([x, -0.5, z, 0.0, -1.0, 0.0])
+            x4 = np.cos(angle2)  # Top point 2
+            z4 = np.sin(angle2)
+            y4 = 0.5
+            
+            # Calculate normals for sides (pointing outward)
+            nx1, ny1, nz1 = x1, 0.0, z1  # Normal for point 1
+            length1 = np.sqrt(nx1*nx1 + nz1*nz1)
+            nx1, nz1 = nx1/length1, nz1/length1
+            
+            nx2, ny2, nz2 = x3, 0.0, z3  # Normal for point 2
+            length2 = np.sqrt(nx2*nx2 + nz2*nz2)
+            nx2, nz2 = nx2/length2, nz2/length2
+            
+            # First triangle of the side quad
+            vertices.extend([x1, y1, z1, nx1, ny1, nz1])  # Top 1
+            vertices.extend([x2, y2, z2, nx1, ny1, nz1])  # Bottom 1
+            vertices.extend([x3, y3, z3, nx2, ny2, nz2])  # Bottom 2
+            
+            # Second triangle of the side quad
+            vertices.extend([x1, y1, z1, nx1, ny1, nz1])  # Top 1
+            vertices.extend([x3, y3, z3, nx2, ny2, nz2])  # Bottom 2
+            vertices.extend([x4, y4, z4, nx2, ny2, nz2])  # Top 2
         
-        # Center points for caps
-        vertices.extend([0.0, 0.5, 0.0, 0.0, 1.0, 0.0])  # Top center
-        vertices.extend([0.0, -0.5, 0.0, 0.0, -1.0, 0.0])  # Bottom center
-        
-        top_center_idx = len(vertices) // 6 - 2
-        bottom_center_idx = len(vertices) // 6 - 1
-        
-        # Generate indices for the sides
+        # 2. Top cap (y = 0.5)
         for i in range(segments):
-            i2 = i * 4  # Each point has 4 vertices (side top, side bottom, cap top, cap bottom)
-            i2_next = ((i + 1) % segments) * 4
+            angle1 = i * 2 * np.pi / segments
+            angle2 = ((i + 1) % segments) * 2 * np.pi / segments
             
-            # Side triangles
-            indices.extend([i2, i2 + 1, i2_next])
-            indices.extend([i2_next, i2 + 1, i2_next + 1])
+            x1 = 0.0           # Center
+            y1 = 0.5
+            z1 = 0.0
             
-            # Top cap triangles
-            indices.extend([i2 + 2, top_center_idx, i2_next + 2])
+            x2 = np.cos(angle1)  # Edge point 1
+            y2 = 0.5
+            z2 = np.sin(angle1)
             
-            # Bottom cap triangles
-            indices.extend([i2 + 3, i2_next + 3, bottom_center_idx])
+            x3 = np.cos(angle2)  # Edge point 2
+            y3 = 0.5
+            z3 = np.sin(angle2)
+            
+            # Top cap normals point up
+            nx, ny, nz = 0.0, 1.0, 0.0
+            
+            # Add triangle
+            vertices.extend([x1, y1, z1, nx, ny, nz])  # Center
+            vertices.extend([x2, y2, z2, nx, ny, nz])  # Edge 1
+            vertices.extend([x3, y3, z3, nx, ny, nz])  # Edge 2
         
-        return np.array(vertices, dtype='f4'), np.array(indices, dtype='i4')
-    
+        # 3. Bottom cap (y = -0.5)
+        for i in range(segments):
+            angle1 = i * 2 * np.pi / segments
+            angle2 = ((i + 1) % segments) * 2 * np.pi / segments
+            
+            x1 = 0.0           # Center
+            y1 = -0.5
+            z1 = 0.0
+            
+            x2 = np.cos(angle1)  # Edge point 1
+            y2 = -0.5
+            z2 = np.sin(angle1)
+            
+            x3 = np.cos(angle2)  # Edge point 2
+            y3 = -0.5
+            z3 = np.sin(angle2)
+            
+            # Bottom cap normals point down
+            nx, ny, nz = 0.0, -1.0, 0.0
+            
+            # Add triangle with reverse winding for bottom
+            vertices.extend([x1, y1, z1, nx, ny, nz])  # Center
+            vertices.extend([x3, y3, z3, nx, ny, nz])  # Edge 2
+            vertices.extend([x2, y2, z2, nx, ny, nz])  # Edge 1
+        
+        return np.array(vertices, dtype='f4'), np.array([], dtype='i4')
+
     def _generate_plane(self):
-        """Generate a simple plane on the XZ plane"""
-        vertices = np.array([
-            # Position (x, y, z), Normal (nx, ny, nz)
-            -0.5, 0.0, -0.5,  0.0, 1.0, 0.0,
-             0.5, 0.0, -0.5,  0.0, 1.0, 0.0,
-             0.5, 0.0,  0.5,  0.0, 1.0, 0.0,
-            -0.5, 0.0,  0.5,  0.0, 1.0, 0.0,
-        ], dtype='f4')
+        """Generate a plane on the XZ plane with direct rendering"""
+        # Create a simple plane with 2 triangles
+        vertices = [
+            # Vertex positions            # Normals (pointing up)
+            -0.5, 0.0, -0.5,              0.0, 1.0, 0.0,  # Back-left
+            0.5, 0.0, -0.5,              0.0, 1.0, 0.0,  # Back-right
+            0.5, 0.0,  0.5,              0.0, 1.0, 0.0,  # Front-right
+            
+            -0.5, 0.0, -0.5,              0.0, 1.0, 0.0,  # Back-left
+            0.5, 0.0,  0.5,              0.0, 1.0, 0.0,  # Front-right
+            -0.5, 0.0,  0.5,              0.0, 1.0, 0.0,  # Front-left
+        ]
         
-        indices = np.array([
-            0, 1, 2,
-            0, 2, 3
-        ], dtype='i4')
-        
-        return vertices, indices
-    
+        return np.array(vertices, dtype='f4'), np.array([], dtype='i4')
+
     def _generate_torus(self, segments=16, tube_segments=8, radius=0.3, tube_radius=0.1):
-        """Generate a torus (donut shape)"""
+        """Generate a torus with direct rendering"""
         vertices = []
-        indices = []
         
+        # Generate triangles for the torus surface
         for i in range(segments):
             for j in range(tube_segments):
-                u = i * 2 * np.pi / segments
-                v = j * 2 * np.pi / tube_segments
+                # Calculate indices for the 4 corners of a quad
+                i1 = i
+                i2 = (i + 1) % segments
+                j1 = j
+                j2 = (j + 1) % tube_segments
                 
-                # Calculate position
-                x = (radius + tube_radius * np.cos(v)) * np.cos(u)
-                y = tube_radius * np.sin(v)
-                z = (radius + tube_radius * np.cos(v)) * np.sin(u)
+                # Calculate the 4 points of the quad
+                # Point 1 (top-left)
+                u1 = i1 * 2 * np.pi / segments
+                v1 = j1 * 2 * np.pi / tube_segments
                 
-                # Calculate normal
-                cx = radius * np.cos(u)
-                cz = radius * np.sin(u)
+                # Point 2 (bottom-left)
+                u2 = i2 * 2 * np.pi / segments
+                v2 = j1 * 2 * np.pi / tube_segments
                 
-                nx = x - cx
-                ny = y
-                nz = z - cz
+                # Point 3 (bottom-right)
+                u3 = i2 * 2 * np.pi / segments
+                v3 = j2 * 2 * np.pi / tube_segments
                 
-                # Normalize normal
-                norm = np.sqrt(nx*nx + ny*ny + nz*nz)
-                nx /= norm
-                ny /= norm
-                nz /= norm
+                # Point 4 (top-right)
+                u4 = i1 * 2 * np.pi / segments
+                v4 = j2 * 2 * np.pi / tube_segments
                 
-                vertices.extend([x, y, z, nx, ny, nz])
+                # Calculate positions
+                # Point 1
+                cx1 = radius * np.cos(u1)
+                cz1 = radius * np.sin(u1)
+                x1 = cx1 + tube_radius * np.cos(v1) * np.cos(u1)
+                y1 = tube_radius * np.sin(v1)
+                z1 = cz1 + tube_radius * np.cos(v1) * np.sin(u1)
+                
+                # Point 2
+                cx2 = radius * np.cos(u2)
+                cz2 = radius * np.sin(u2)
+                x2 = cx2 + tube_radius * np.cos(v2) * np.cos(u2)
+                y2 = tube_radius * np.sin(v2)
+                z2 = cz2 + tube_radius * np.cos(v2) * np.sin(u2)
+                
+                # Point 3
+                cx3 = radius * np.cos(u3)
+                cz3 = radius * np.sin(u3)
+                x3 = cx3 + tube_radius * np.cos(v3) * np.cos(u3)
+                y3 = tube_radius * np.sin(v3)
+                z3 = cz3 + tube_radius * np.cos(v3) * np.sin(u3)
+                
+                # Point 4
+                cx4 = radius * np.cos(u4)
+                cz4 = radius * np.sin(u4)
+                x4 = cx4 + tube_radius * np.cos(v4) * np.cos(u4)
+                y4 = tube_radius * np.sin(v4)
+                z4 = cz4 + tube_radius * np.cos(v4) * np.sin(u4)
+                
+                # Calculate normals (pointing outward from tube center)
+                # Normal 1
+                nx1 = x1 - cx1
+                ny1 = y1
+                nz1 = z1 - cz1
+                length1 = np.sqrt(nx1*nx1 + ny1*ny1 + nz1*nz1)
+                nx1, ny1, nz1 = nx1/length1, ny1/length1, nz1/length1
+                
+                # Normal 2
+                nx2 = x2 - cx2
+                ny2 = y2
+                nz2 = z2 - cz2
+                length2 = np.sqrt(nx2*nx2 + ny2*ny2 + nz2*nz2)
+                nx2, ny2, nz2 = nx2/length2, ny2/length2, nz2/length2
+                
+                # Normal 3
+                nx3 = x3 - cx3
+                ny3 = y3
+                nz3 = z3 - cz3
+                length3 = np.sqrt(nx3*nx3 + ny3*ny3 + nz3*nz3)
+                nx3, ny3, nz3 = nx3/length3, ny3/length3, nz3/length3
+                
+                # Normal 4
+                nx4 = x4 - cx4
+                ny4 = y4
+                nz4 = z4 - cz4
+                length4 = np.sqrt(nx4*nx4 + ny4*ny4 + nz4*nz4)
+                nx4, ny4, nz4 = nx4/length4, ny4/length4, nz4/length4
+                
+                # First triangle (1-2-3)
+                vertices.extend([x1, y1, z1, nx1, ny1, nz1])
+                vertices.extend([x2, y2, z2, nx2, ny2, nz2])
+                vertices.extend([x3, y3, z3, nx3, ny3, nz3])
+                
+                # Second triangle (1-3-4)
+                vertices.extend([x1, y1, z1, nx1, ny1, nz1])
+                vertices.extend([x3, y3, z3, nx3, ny3, nz3])
+                vertices.extend([x4, y4, z4, nx4, ny4, nz4])
         
-        # Generate indices
-        for i in range(segments):
-            for j in range(tube_segments):
-                # Calculate indices
-                p0 = i * tube_segments + j
-                p1 = ((i + 1) % segments) * tube_segments + j
-                p2 = ((i + 1) % segments) * tube_segments + (j + 1) % tube_segments
-                p3 = i * tube_segments + (j + 1) % tube_segments
-                
-                # Add triangles
-                indices.extend([p0, p1, p2])
-                indices.extend([p0, p2, p3])
-        
-        return np.array(vertices, dtype='f4'), np.array(indices, dtype='i4')
-    
+        return np.array(vertices, dtype='f4'), np.array([], dtype='i4')
+
     def __str__(self) -> str:
         return f"Shape3D({self.shape_type}, size={self.size}, pos={self.position})"
     

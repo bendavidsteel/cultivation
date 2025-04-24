@@ -8,8 +8,10 @@ from watchdog.observers import Observer
 import utils
 
 class BaseLayer:
-    def __init__():
-        raise NotImplementedError("BaseLayer is an abstract class and cannot be instantiated")
+    source_layer: bool
+
+    def __init__(self):
+        self.source_layer = True
 
     def update(self):
         pass
@@ -545,16 +547,23 @@ class Gradient(BaseShader):
             """
 
 class SolidColor(BaseShader):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # set defaults
+        if 'color' not in self.kwargs:
+            self.kwargs['color'] = (1.0, 0.0, 0.0)
+
     def get_fragment_shader(self):
         return """
         #version 330
 
         uniform vec2 resolution;
         uniform float time;
+        uniform vec3 color;
 
         out vec4 fragColor;
         void main() {
-            fragColor = vec4(1.0, 0.0, 0.0, 1.0); // Red color
+            fragColor = vec4(color, 1.0); // Red color
         }
         """
     

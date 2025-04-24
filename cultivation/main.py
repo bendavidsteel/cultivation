@@ -12,6 +12,7 @@ import numpy as np
 import soundcard as sc
 import glm
 
+import inputs
 import layers
 import shape3d
 import utils
@@ -96,7 +97,7 @@ class LayerManager:
         except Exception as e:
             self.logger.error(f"Error loading config file: {e}, {traceback.format_exc()}")
 
-    def update(self):
+    def update(self, resolution):
         try:
             if self.update_layers:
                 # Clean up existing resources
@@ -135,6 +136,8 @@ class LayerManager:
                                 new_layer = self.premade_shader_map[layer_name](self.ctx, self.logger, **layer_kwargs)
                             elif layer_name in self.python_obj_map:
                                 new_layer = layers.PythonLayer(self.ctx, self.logger, self.python_obj_map[layer_name], **layer_kwargs)
+                            elif layer_name == 'webcam':
+                                new_layer = inputs.Webcam(self.ctx, self.logger, resolution)
                             else:
                                 new_layer = layers.CustomShader(self.ctx, self.logger, layer_name, **layer_kwargs)
 
@@ -294,7 +297,7 @@ class RealTimeShaderApp(mglw.WindowConfig):
         self.fft[:, :fft.shape[1]] = fft
         moving_avg_weights = (np.ones(self.fft_memory) - self.smoothing_factor) ** np.arange(self.fft_memory)
         fft = np.sum(self.fft * moving_avg_weights, axis=1)
-        self.layer_manager.update()
+        self.layer_manager.update(resolution)
         self.smoothing_factor = self.layer_manager.get_smoothing_factor()
         self.layer_manager.render(resolution, time, fft)
 
